@@ -30,6 +30,7 @@ pip install transformers
 pip install addict
 pip install yapf
 pip install timm
+pip install gradio
 ```
 SAM 2 사전 학습 체크포인트
 ```python
