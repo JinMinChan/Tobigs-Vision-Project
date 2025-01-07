@@ -23,14 +23,7 @@ pip install --no-build-isolation -e grounding_dino
 ```
 추가로 설치해야 할 라이브러리
 ```python
-pip install opencv-python
-pip install supervision
-pip install pycocotools
-pip install transformers
-pip install addict
-pip install yapf
-pip install timm
-pip install gradio
+pip install opencv-python supervision pycocotools transformers addict yapf timm gradio
 ```
 SAM 2 사전 학습 체크포인트
 ```python
