@@ -35,3 +35,10 @@ Grounding Dino 사전 학습 체크포인트
 cd gdino_checkpoints
 bash download_ckpts.sh
 ```
+Demo Script
+```python
+#지정된 이미지 및 참조 물체로 결과 추출
+python tobigs.py
+#Gradio를 통해 이미지, 원하는 가구, 참조물체, 참조물체 크기를 Input으로 줄 수 있음
+python tobigs_gradio.py
+```
