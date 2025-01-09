@@ -15,9 +15,11 @@ from sam2.sam2_image_predictor import SAM2ImagePredictor
 from transformers import Blip2Processor, Blip2ForConditionalGeneration
 from PIL import Image
 
-# MiDaS (DPT)
+# MiDaS (DPT) 및 관련 라이브러리
 from transformers import DPTForDepthEstimation, DPTImageProcessor
 import matplotlib.pyplot as plt
+import cv2
+from pycocotools.mask import decode as decode_mask
 
 # --------------------------------------------------------------
 # 1. 하이퍼파라미터 / 환경설정
@@ -49,8 +51,13 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 RESULT_JSON_NAME = "results.json"
 
 # (예시) 모니터 실제 크기 (mm)
-REF_MONITOR_WIDTH_MM = 615.0  # 모니터의 실제 가로 길이
-REF_MONITOR_HEIGHT_MM = 365.0 # 모니터의 실제 세로 길이
+MONITOR_WIDTH_MM = 615.0  # 모니터의 실제 가로 길이
+MONITOR_HEIGHT_MM = 365.0 # 모니터의 실제 세로 길이
+
+# 카메라 내부 파라미터 (예: 갤럭시 S23 추정)
+FOCAL_LENGTH_MM = 3.29    
+SENSOR_WIDTH_MM = 5.76   
+SENSOR_HEIGHT_MM = 4.29  
 
 # --------------------------------------------------------------
 # 2. 모델 빌드 함수
@@ -75,83 +82,53 @@ def build_midas_model():
     midas_model = DPTForDepthEstimation.from_pretrained(MIDAS_MODEL_NAME)
     midas_processor = DPTImageProcessor.from_pretrained(MIDAS_MODEL_NAME)
     midas_model.eval()
-    # DPT는 기본적으로 CPU에 올라가 있으나,
-    # 필요 시 midas_model.to(DEVICE) 해도 무방 (연산이 많을 경우 GPU 사용)
     return midas_model, midas_processor
 
 def build_blip2_model():
     """BLIP-2 (FlanT5) 모델 빌드."""
     processor = Blip2Processor.from_pretrained("Salesforce/blip2-flan-t5-xl")
     model = Blip2ForConditionalGeneration.from_pretrained("Salesforce/blip2-flan-t5-xl")
-    # 모델을 GPU로 이동
     model.to("cpu")
     return processor, model
 
 # --------------------------------------------------------------
-# 3. MiDaS(DPT) 관련 유틸 함수
+# 3. MiDaS(DPT) 관련 유틸 함수 (새로운 알고리즘용)
 # --------------------------------------------------------------
-def generate_depth_map(image_bgr: np.ndarray, midas_model, midas_processor):
-    """
-    MiDaS(DPT) 모델을 이용해 전체 이미지의 깊이맵을 생성합니다.
-    """
-    # OpenCV BGR -> RGB 변환
+def generate_relative_depth_map(image_bgr: np.ndarray, midas_model, midas_processor):
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     inputs = midas_processor(images=image_rgb, return_tensors="pt").to("cpu")
-
     with torch.no_grad():
         outputs = midas_model(**inputs)
         depth_map = outputs.predicted_depth.squeeze().cpu().numpy()
-
-    # 원본 사이즈(h, w)에 맞춰서 리사이즈
     h, w, _ = image_bgr.shape
     depth_map_resized = cv2.resize(depth_map, (w, h), interpolation=cv2.INTER_NEAREST)
     return depth_map_resized
 
-def decode_mask_rle(rle_seg):
-    """pycocotools RLE 형식을 복원하여 2D mask(ndarray)로 변환."""
-    return mask_util.decode(rle_seg)
+def get_mask(segmentation):
+    return decode_mask(segmentation)
 
-def compute_scale_factor_for_monitor(annotations):
-    """
-    모니터 클래스를 참조하여 (모니터 실제 너비 / 모니터 픽셀 너비) 스케일 팩터 계산.
-    """
-    monitor_anns = [ann for ann in annotations if ann["class_name"].lower() == "monitor"]
-    if len(monitor_anns) == 0:
-        return None
+def get_average_relative_depth(relative_depth_map, mask):
+    ys, xs = np.where(mask > 0)
+    if len(ys) == 0 or len(xs) == 0:
+        return 0.0
+    values = relative_depth_map[ys, xs]
+    return np.mean(values)
 
-    # 모니터가 여러 개라면, 여기서는 첫 번째만 사용 (원하는 로직으로 수정 가능)
-    monitor_seg = monitor_anns[0]["segmentation"]
-    monitor_mask = decode_mask_rle(monitor_seg)
-    xs = np.where(monitor_mask > 0)[1]  # x 좌표만 추출
+def measure_2d_size_from_mask(mask):
+    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        raise ValueError("No contour found in mask")
+    max_contour = max(contours, key=cv2.contourArea)
+    rect = cv2.minAreaRect(max_contour)
+    (w_rot, h_rot) = rect[1]
+    if w_rot < 1e-5 or h_rot < 1e-5:
+        raise ValueError("Invalid minAreaRect dimension")
+    width_px = max(w_rot, h_rot)
+    height_px = min(w_rot, h_rot)
+    return width_px, height_px
 
-    if len(xs) == 0:
-        return None
-
-    monitor_pixel_width = np.max(xs) - np.min(xs)
-    if monitor_pixel_width <= 0:
-        return None
-
-    scale_factor = REF_MONITOR_WIDTH_MM / monitor_pixel_width
-    return scale_factor
-
-def estimate_object_size(mask_rle, scale_factor):
-    """
-    객체 마스크로부터 width, height (pixels)을 구하고,
-    스케일 팩터를 적용해 mm로 변환.
-    """
-    obj_mask = decode_mask_rle(mask_rle)
-    ys, xs = np.where(obj_mask > 0)
-
-    if len(xs) == 0 or len(ys) == 0:
-        return 0.0, 0.0
-
-    width_pixels = float(np.max(xs) - np.min(xs))
-    height_pixels = float(np.max(ys) - np.min(ys))
-
-    width_mm = width_pixels * scale_factor
-    height_mm = height_pixels * scale_factor
-
-    return width_mm, height_mm
+def pinhole_distance(object_pixel_size, object_real_size, focal_length_mm, sensor_size_mm, image_size_px):
+    return (focal_length_mm * object_real_size * image_size_px) / (object_pixel_size * sensor_size_mm)
 
 # --------------------------------------------------------------
 # 4. 메인 파이프라인
@@ -160,7 +137,7 @@ def main():
     """
     1) GroundingDINO + SAM2로 객체 검출 및 분할
     2) BLIP-2로 색상, 스타일 분석
-    3) MiDaS(DPT)로 전체 이미지 기준 크기 추정
+    3) MiDaS(DPT)로 전체 이미지 기준 크기 추정 (새 알고리즘 적용)
     4) 결과를 JSON(class, color, style, width, height)로 저장
     """
     # --------------------------
@@ -174,18 +151,16 @@ def main():
     # --------------------------
     # 4-2) 이미지 로드
     # --------------------------
-    # GroundingDINO의 유틸 함수
-    image_source, image_rgb = load_image(IMG_PATH)  # image_source: OpenCV BGR(Numpy), image_rgb: PIL->np RGB
-
-    sam2_predictor.set_image(image_source)  # (H, W, C) BGR로 전달
-    original_bgr = cv2.imread(IMG_PATH)     # MiDaS용(원본 BGR)
+    image_source, image_rgb = load_image(IMG_PATH)
+    sam2_predictor.set_image(image_source)
+    original_bgr = cv2.imread(IMG_PATH)
 
     # --------------------------
     # 4-3) GroundingDINO로 박스 검출
     # --------------------------
     boxes, confidences, labels = predict(
         model=grounding_model,
-        image=image_rgb,        # RGB
+        image=image_rgb,
         caption=TEXT_PROMPT,
         box_threshold=BOX_THRESHOLD,
         text_threshold=TEXT_THRESHOLD,
@@ -204,7 +179,6 @@ def main():
         box=input_boxes_xyxy,
         multimask_output=False,
     )
-    # (N, 1, H, W) -> (N, H, W) 로 차원 축소
     if masks.ndim == 4:
         masks = masks.squeeze(1)
 
@@ -225,12 +199,7 @@ def main():
     )
 
     label_annotator = sv.LabelAnnotator()
-    # confidences가 torch.Tensor인지 numpy인지 확인 -> GroundingDINO는 보통 Tensor 리턴
-    if isinstance(confidences, torch.Tensor):
-        confidences_np = confidences.numpy()
-    else:
-        confidences_np = confidences
-
+    confidences_np = confidences.numpy() if isinstance(confidences, torch.Tensor) else confidences
     labels_text = [
         f"{cls_name} {conf:.2f}"
         for cls_name, conf in zip(labels, confidences_np)
@@ -254,20 +223,12 @@ def main():
     # 4-6) BLIP-2로 색상/스타일 분석
     # --------------------------
     pil_image = Image.open(IMG_PATH).convert("RGB")
+    scores_np = scores.numpy() if isinstance(scores, torch.Tensor) else scores
 
-    # scores가 이미 numpy 배열인 경우 대비
-    if isinstance(scores, torch.Tensor):
-        scores_np = scores.numpy()
-    else:
-        scores_np = scores
-
-    # annotations 구성
     annotations = []
     for cls_name, box_xyxy, mask_arr, score_val in zip(labels, input_boxes_xyxy, masks, scores_np):
-        # mask를 pycocotools RLE로 변환
         rle = mask_util.encode(np.asfortranarray(mask_arr.astype(np.uint8)))
-        rle["counts"] = rle["counts"].decode("utf-8")  # JSON 저장 호환성
-
+        rle["counts"] = rle["counts"].decode("utf-8")
         annotations.append({
             "class_name": cls_name,
             "bbox": box_xyxy.tolist(),
@@ -275,30 +236,22 @@ def main():
             "score": float(score_val),
         })
 
-    # BLIP-2 색상/스타일 분석 및 저장용 dict 구성
     for annotation in annotations:
         cls_name = annotation["class_name"]
         x1, y1, x2, y2 = annotation["bbox"]
-
         cropped_img = pil_image.crop((x1, y1, x2, y2))
 
-        # BLIP-2 입력 구성
         text_color = (
             f"Describe the color of the {cls_name}. "
             "Is it white, black, gray, red, blue, green, yellow, brown, beige, pink, purple, or orange?"
         )
         input_color = blip2_processor(images=cropped_img, text=text_color, return_tensors="pt")
-
-        # 텐서 -> GPU 이동
         for k, v in input_color.items():
             if torch.is_tensor(v):
                 input_color[k] = v.to("cpu")
-
-        # BLIP-2 추론 (색상)
         output_color = blip2_model.generate(**input_color)
         color_description = blip2_processor.decode(output_color[0], skip_special_tokens=True)
 
-        # BLIP-2 입력 구성 (스타일)
         text_style = (
             f"Describe the style of the {cls_name}. "
             "Is it modern, minimal, natural, vintage, classic, French, Nordic, industrial, lovely, Korean, or unique?"
@@ -307,8 +260,6 @@ def main():
         for k, v in input_style.items():
             if torch.is_tensor(v):
                 input_style[k] = v.to("cpu")
-
-        # BLIP-2 추론 (스타일)
         output_style = blip2_model.generate(**input_style)
         style_description = blip2_processor.decode(output_style[0], skip_special_tokens=True)
 
@@ -316,37 +267,72 @@ def main():
         annotation["style"] = style_description
 
     # --------------------------
-    # 4-7) MiDaS로 크기 추정
+    # 4-7) MiDaS로 크기 추정 (새로운 알고리즘 적용)
     # --------------------------
-    depth_map = generate_depth_map(original_bgr, midas_model, midas_processor)
+    h_img, w_img, _ = original_bgr.shape
+    relative_depth_map = generate_relative_depth_map(original_bgr, midas_model, midas_processor)
 
-    # 모니터로부터 scale_factor 구하기
-    scale_factor = compute_scale_factor_for_monitor(annotations)
-    if scale_factor is None:
-        scale_factor = 0.0  # 모니터를 찾지 못하면 0 처리
+    # [A] 참조 물체(모니터) 처리
+    monitor_ann = next((ann for ann in annotations if ann["class_name"].lower() == "monitor"), None)
+    if monitor_ann is not None:
+        monitor_mask = get_mask(monitor_ann["segmentation"])
+        monitor_px_w, monitor_px_h = measure_2d_size_from_mask(monitor_mask)
+        monitor_avg_rel_depth = get_average_relative_depth(relative_depth_map, monitor_mask)
+        Z_monitor_estimated = pinhole_distance(
+            object_pixel_size = monitor_px_w,
+            object_real_size  = MONITOR_WIDTH_MM,
+            focal_length_mm   = FOCAL_LENGTH_MM,
+            sensor_size_mm    = SENSOR_WIDTH_MM,
+            image_size_px     = w_img
+        )
+        scale = Z_monitor_estimated / monitor_avg_rel_depth if monitor_avg_rel_depth != 0 else 1.0
+        real_depth_map = relative_depth_map * scale
 
-    # 각 객체에 대해 width/height(mm) 추정
-    results_for_json = []
+        # 모니터 실제 크기를 참조값으로 저장
+        monitor_ann["width"] = MONITOR_WIDTH_MM
+        monitor_ann["height"] = MONITOR_HEIGHT_MM
+    else:
+        real_depth_map = relative_depth_map
+
+
+    # [B] 텀블러 또는 다른 객체 실제 크기 계산
+    tumbler_ann = next((ann for ann in annotations if ann["class_name"].lower() == "tumbler"), None)
+    if tumbler_ann is not None:
+        tumbler_mask = get_mask(tumbler_ann["segmentation"])
+        tumbler_px_w, tumbler_px_h = measure_2d_size_from_mask(tumbler_mask)
+        tumbler_avg_depth = get_average_relative_depth(real_depth_map, tumbler_mask)
+
+        tumbler_real_width = (
+            tumbler_px_w * tumbler_avg_depth * SENSOR_WIDTH_MM
+        ) / (FOCAL_LENGTH_MM * w_img)
+
+        tumbler_real_height = (
+            tumbler_px_h * tumbler_avg_depth * SENSOR_HEIGHT_MM
+        ) / (FOCAL_LENGTH_MM * h_img)
+
+        tumbler_ann["width"] = round(tumbler_real_width, 2)
+        tumbler_ann["height"] = round(tumbler_real_height, 2)
+    else:
+        pass
+
     for ann in annotations:
-        mask_rle = ann["segmentation"]
-
-        if scale_factor > 0.0:
-            width_mm, height_mm = estimate_object_size(mask_rle, scale_factor)
-        else:
-            width_mm, height_mm = 0.0, 0.0
-
-        # 최종 JSON 저장 구조
-        results_for_json.append({
-            "class_name": ann["class_name"],
-            "color": ann["color"],
-            "style": ann["style"],
-            "width": round(width_mm, 2),
-            "height": round(height_mm, 2),
-        })
+        if "width" not in ann or "height" not in ann:
+            ann["width"] = 0.0
+            ann["height"] = 0.0
 
     # --------------------------
     # 4-8) 결과 JSON 저장
     # --------------------------
+    results_for_json = []
+    for ann in annotations:
+        results_for_json.append({
+            "class_name": ann["class_name"],
+            "color": ann.get("color", ""),
+            "style": ann.get("style", ""),
+            "width": ann.get("width", 0.0),
+            "height": ann.get("height", 0.0),
+        })
+
     json_path = OUTPUT_DIR / RESULT_JSON_NAME
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(results_for_json, f, indent=4, ensure_ascii=False)
@@ -356,6 +342,6 @@ def main():
     print(f"       - {OUTPUT_DIR / 'annotated_image.jpg'}")
     print(f"       - {OUTPUT_DIR / 'annotated_image_with_mask.jpg'}")
 
-
 if __name__ == "__main__":
     main()
+
