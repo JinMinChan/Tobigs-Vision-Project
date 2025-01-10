@@ -24,23 +24,22 @@
 
 2. **참조 물체 세그멘테이션**
    - 마스크로부터 참조물체의 2D 크기와 MiDaS 상대 깊이 맵의 평균값 계산.  
-   - **핀홀 카메라 공식**을 사용해 참조 물체까지 거리와 전역 스케일 추정:
-     \[
-     s = \frac{Z_\mathrm{object}}{\bar{d}_\mathrm{ref}}
-     \]
+   - **핀홀 카메라 공식**을 사용해 참조 물체까지 거리와 전역 스케일 추정:  
+     ```
+     s = Z_object / d_ref
+     ```
 
 3. **장면 전체 깊이 계산**
-   - 전역 스케일을 적용해 **절대 깊이 맵** 생성:
-     \[
-     \text{real\_depth\_map} = \text{relative\_depth\_map} \times s
-     \]
+   - 전역 스케일을 적용해 **절대 깊이 맵** 생성:  
+     ```
+     real_depth_map = relative_depth_map * s
+     ```
 
 4. **측정 대상 세그멘테이션**
-   - 텀블러의 2D 크기(픽셀 단위 폭·높이)와 절대 깊이 맵을 결합하여 실제 크기 추정:
-     \[
-     \text{Width} = \frac{\text{픽셀 폭} \times \bar{Z}_\mathrm{tumbler} \times \text{센서 폭}}
-                        {f \times \text{이미지 폭}}
-     \]
+   - 텀블러의 2D 크기(픽셀 단위 폭·높이)와 절대 깊이 맵을 결합하여 실제 크기 추정:  
+     ```
+     Width = (픽셀 폭 * 평균 깊이 Z_tumbler * 센서 폭) / (focal_length * 이미지 폭)
+     ```
 
 ---
 
@@ -51,8 +50,8 @@
 - 처리:
   - OpenCV `cv2.findContours()`로 마스크에서 윤곽선을 추출.  
   - 가장 큰 Contour를 선택해 `cv2.minAreaRect()`로 기울어진 사각형 생성.  
-  - 사각형의 폭·높이를 정렬: \( \text{width} \geq \text{height} \).  
-- 출력: \( (\text{width\_px}, \text{height\_px}) \) (픽셀 단위).
+  - 사각형의 폭·높이를 정렬: `width >= height`.  
+- 출력: `(width_px, height_px)` (픽셀 단위).
 
 ---
 
@@ -61,31 +60,27 @@
   - 물체의 픽셀 크기, 실제 크기, 카메라 초점 거리, 센서 크기, 이미지 해상도.  
 - 처리:  
   - **핀홀 카메라 공식**으로 물체까지의 거리 추정:  
-    \[
-    Z = \frac{f \times \text{실제 크기} \times \text{이미지 해상도}}
-             {\text{픽셀 크기} \times \text{센서 크기}}
-    \]
-- 출력: 물체까지 거리 (\(Z\), mm 단위).
+    ```
+    Z = (focal_length * 실제 크기 * 이미지 해상도) / (픽셀 크기 * 센서 크기)
+    ```
+- 출력: 물체까지 거리 `Z` (mm 단위).
 
 ---
 
-### **핀홀 카메라 모델(Pinhole Camera Model)**
+### 핀홀 카메라 모델(Pinhole Camera Model)
 
-**공식**
-   - 물체의 실제 크기(\(D_\text{real}\)), 물체가 투영된 픽셀 크기(\(D_\text{pixel}\)), 카메라 초점 거리(\(f\)), 그리고 센서 크기(\(S_\text{sensor}\)) 사이의 관계는 아래와 같다:
-<div align="center">
-  \[
-  Z = \frac{f \cdot D_\text{real} \cdot I_\text{size}}{D_\text{pixel} \cdot S_\text{sensor}}
-  \]
-</div>
+**공식**  
+핀홀 카메라 모델의 물체 거리 계산 관계는 아래와 같습니다:  
+```
+Z = (focal_length * 실제 크기 * 이미지 해상도) / (픽셀 크기 * 센서 크기)
+```
 
-     
-     - \( Z \): 물체까지의 거리(깊이).
-     - \( f \): 카메라의 초점 거리(센서 기준, mm 단위).
-     - \( D_\text{real} \): 물체의 실제 크기(현실 세계에서, mm 단위).
-     - \( D_\text{pixel} \): 이미지에서 측정된 물체의 크기(픽셀 단위).
-     - \( S_\text{sensor} \): 카메라 센서 크기(가로 또는 세로, mm 단위).
-     - \( I_\text{size} \): 이미지의 해상도(가로 또는 세로, 픽셀 단위).
+- `Z`: 물체까지의 거리(깊이).  
+- `focal_length`: 카메라의 초점 거리(센서 기준, mm 단위).  
+- `실제 크기`: 물체의 실제 크기(현실 세계에서, mm 단위).  
+- `픽셀 크기`: 이미지에서 측정된 물체의 크기(픽셀 단위).  
+- `센서 크기`: 카메라 센서 크기(가로 또는 세로, mm 단위).  
+- `이미지 해상도`: 이미지의 가로 또는 세로 픽셀 해상도.
 
 ---
 
