@@ -1,7 +1,7 @@
 # Tobigs-Vision-Project
 [GroundedSam2](GroundedSam2.md) | [Size_Estimation](Size_Estimation.md)
 <p align="center">
-  <img src="Conference_Poster.jpg" alt="poster" width="45%">
+  <img src="Conference_Poster.jpg" alt="poster" width="65%">
 </p>
 ## Environment
 - Ubuntu 20.04
